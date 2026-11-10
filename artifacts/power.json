@@ -1,0 +1,7 @@
+{
+  "test_frauds": 77,
+  "test_legit": 40925,
+  "auc_null_se": 0.032928919996826324,
+  "auc_critical_5pct": 0.5541647805027796,
+  "min_detectable_auc_80power": 0.5818769317563274
+}

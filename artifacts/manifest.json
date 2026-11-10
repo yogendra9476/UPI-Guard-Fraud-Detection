@@ -1,0 +1,150 @@
+{
+  "run_utc": "2026-11-10T06:41:58+00:00",
+  "fast_mode": false,
+  "dataset_file": "upi_transactions_2024.csv",
+  "dataset_sha256": "8e46a45fd12c3e9e75a7cf1ac73604bdd9b2bd72859e3374d0153256ac4c89b6",
+  "checks": {
+    "rows": 250000,
+    "columns": 17,
+    "missing_values": 0,
+    "duplicate_rows": 0,
+    "duplicate_ids": 0,
+    "fraud_count": 480,
+    "fraud_rate": 0.00192,
+    "date_min": "2024-01-01 00:05:10",
+    "date_max": "2024-12-30 23:55:40",
+    "amount_min": 10,
+    "amount_max": 42099,
+    "amount_median": 629.0,
+    "hour_consistent_with_timestamp": true,
+    "weekday_consistent_with_timestamp": true,
+    "weekend_flag_consistent": true,
+    "has_customer_identifier": false
+  },
+  "split": [
+    {
+      "split": "Train",
+      "start": "2024-01-01",
+      "end": "2024-08-31",
+      "rows": 167149,
+      "frauds": 316,
+      "legitimate": 166833,
+      "fraud_rate_pct": 0.1891
+    },
+    {
+      "split": "Validation",
+      "start": "2024-09-01",
+      "end": "2024-10-31",
+      "rows": 41849,
+      "frauds": 87,
+      "legitimate": 41762,
+      "fraud_rate_pct": 0.2079
+    },
+    {
+      "split": "Test",
+      "start": "2024-11-01",
+      "end": "2024-12-30",
+      "rows": 41002,
+      "frauds": 77,
+      "legitimate": 40925,
+      "fraud_rate_pct": 0.1878
+    },
+    {
+      "split": "Total",
+      "start": "2024-01-01",
+      "end": "2024-12-30",
+      "rows": 250000,
+      "frauds": 480,
+      "legitimate": 249520,
+      "fraud_rate_pct": 0.192
+    }
+  ],
+  "seed": 42,
+  "features": [
+    "log_amount",
+    "amount_to_cat_median",
+    "amount_cat_pctile",
+    "high_amount_cat",
+    "hour_of_day",
+    "hour_sin",
+    "hour_cos",
+    "is_night",
+    "is_weekend",
+    "same_bank",
+    "age_gap",
+    "seg_count_1h",
+    "seg_count_24h",
+    "global_count_10m",
+    "transaction_type",
+    "merchant_category",
+    "sender_age_group",
+    "receiver_age_group",
+    "sender_state",
+    "sender_bank",
+    "receiver_bank",
+    "device_type",
+    "network_type",
+    "day_of_week"
+  ],
+  "excluded_columns": {
+    "transaction_id": "Row identifier; carries no behavioural meaning.",
+    "timestamp": "Used only for ordering, splitting and velocity features.",
+    "transaction_status": "Outcome of authorisation (SUCCESS/FAILED); not known before the debit decision -> temporal leakage."
+  },
+  "cost_review_inr": 25.0,
+  "mean_fraud_amount_train_inr": 1504.0854430379748,
+  "break_even_precision": 0.016621396155197553,
+  "risk_score_terms": [
+    [
+      "Night hour (00:00-05:59)",
+      1.0
+    ],
+    [
+      "Amount above category p95 (train-fitted)",
+      1.0
+    ],
+    [
+      "Web device",
+      0.7
+    ],
+    [
+      "Night x high amount (interaction)",
+      1.5
+    ],
+    [
+      "Age gap >= 3 brackets",
+      0.6
+    ],
+    [
+      "Segment velocity in top 5 % (past 1 h)",
+      0.8
+    ],
+    [
+      "P2P transfer above INR 5,000",
+      0.6
+    ]
+  ],
+  "seg_count_1h_p95_train": 1.0,
+  "cnn": {
+    "available": true,
+    "n_inputs": 78,
+    "epochs_run": 6,
+    "val_ap_history": [
+      0.0023674773819297467,
+      0.0020954828693639494,
+      0.003125449283062978,
+      0.0024442835594013328,
+      0.0023378427106403327,
+      0.0025707271012310262
+    ]
+  },
+  "versions": {
+    "python": "3.13.18",
+    "numpy": "2.5.3",
+    "pandas": "3.0.5",
+    "scikit-learn": "1.9.1",
+    "lightgbm": "4.7.0",
+    "torch": "2.15.0+cu132"
+  },
+  "runtime_seconds": 2697.1
+}

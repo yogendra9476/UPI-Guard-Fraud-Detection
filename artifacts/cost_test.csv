@@ -1,0 +1,13 @@
+threshold,flagged,frauds_caught,fraud_loss_total,loss_prevented,review_cost,net_benefit,model,operating_point
+0.0018905288096249455,41002,77,111882.0,111882.0,1025050.0,-913168.0,Prevalence baseline,Alert budget 1%
+inf,0,0,111882.0,0.0,0.0,0.0,Prevalence baseline,Cost-optimal (INR 25)
+0.0022873768063304558,385,1,111882.0,152.0,9625.0,-9473.0,Logistic Regression,Alert budget 1%
+inf,0,0,111882.0,0.0,0.0,0.0,Logistic Regression,Cost-optimal (INR 25)
+0.002799286684103183,376,0,111882.0,0.0,9400.0,-9400.0,Random Forest,Alert budget 1%
+0.002942063293270162,118,0,111882.0,0.0,2950.0,-2950.0,Random Forest,Cost-optimal (INR 25)
+0.002293897053026766,412,0,111882.0,0.0,10300.0,-10300.0,LightGBM,Alert budget 1%
+0.002274645825022224,598,0,111882.0,0.0,14950.0,-14950.0,LightGBM,Cost-optimal (INR 25)
+0.002109655834997865,386,1,111882.0,88.0,9650.0,-9562.0,MLP,Alert budget 1%
+inf,0,0,111882.0,0.0,0.0,0.0,MLP,Cost-optimal (INR 25)
+0.002650239559513251,451,0,111882.0,0.0,11275.0,-11275.0,1D-CNN,Alert budget 1%
+0.002650239559513251,451,0,111882.0,0.0,11275.0,-11275.0,1D-CNN,Cost-optimal (INR 25)

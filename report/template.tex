@@ -1,0 +1,473 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{\sc e}\kern-.125em X}}
+\newcommand{\inr}{INR~}
+
+\begin{document}
+
+\title{UPI Guard: An Audited Pre-Debit Fraud-Risk Benchmark for UPI Payments with Learnability Testing, Out-of-Time Evaluation and INR Cost Analysis}
+
+\author{\IEEEauthorblockN{Yogendra Pandey, Sahil Mangla, Kuldeep Khengar}
+\IEEEauthorblockA{Goa Institute of Management --- Big Data Analytics\\
+Student IDs: B2026109, B2026097, B2026082\\
+Email: \{yogendra.pandey, sahil.mangla, kuldeep.devendrasinhkhengar\}2026b@gim.ac.in}}
+
+\maketitle
+
+\begin{abstract}
+Real-time fraud screening for India's Unified Payments Interface (UPI) must decide, before a debit is authorised, whether to approve a payment or demand step-up verification. We build and evaluate such a pre-debit scorer on a public log of <<NROWS>> UPI transactions from calendar year 2024 (<<NFRAUD>> labelled frauds, <<PREV>>\% prevalence). Unlike our earlier drafts, every number reported here comes from one identified, seeded run, whose dataset hash, split counts and confusion counts are published. The pipeline (i)~removes the post-authorisation \texttt{transaction\_status} field and uses only <<NFEAT>> features available before debit, including past-only velocity counts; (ii)~separates training (Jan--Aug), calibration and threshold selection (Sep--Oct) and a single out-of-time test (Nov--Dec; <<TEN>> transactions, <<TEF>> frauds); (iii)~audits whether the label is learnable at all; and (iv)~converts scores into a net benefit in Indian rupees using the real transaction amounts. The audit finds no attribute associated with fraud after Benjamini--Hochberg correction (<<NBHSIG>> of <<NTESTS>> tests), and a label-permutation test gives $p=<<PERMP>>$. Logistic regression, random forest, LightGBM, an MLP and a 1D-CNN reach test ROC-AUC between <<AUCMIN>> and <<AUCMAX>>. The best, <<BEST>> at <<BESTAUC>> (95\% CI [<<BESTLO>>, <<BESTHI>>]), gives no reliable evidence of skill: it is not significant after Holm correction ($p=<<BESTPHOLM>>$), lies below the minimum detectable AUC of <<MDA>>, and contradicts its own training-window CV AUC of <<BESTCV>>. At a review cost of \inr<<COSTREV>>, a flag pays for itself only above <<BEPREC>>\% precision (<<BELIFT>>$\times$ the base rate), so the cost-optimal policy is to intervene on no transaction. A positive control with planted, simulated signal shows that the same pipeline recovers near-oracle discrimination (AUC <<PCREFLGB>> vs.\ oracle <<PCREFORC>>), so the null result reflects the data, not the method. A feature-order experiment shows that the 1D-CNN's convolutions add nothing. Its accuracy is insensitive to column order, it does not beat order-invariant models, and it trails them on PR-AUC. We conclude that this public dataset cannot support claims of production-grade UPI fraud detection, including the AUC of 0.999 in our earlier drafts, and we specify the data a real deployment would require.
+\end{abstract}
+
+\begin{IEEEkeywords}
+UPI, payment fraud, pre-debit screening, data provenance, out-of-time validation, permutation test, calibration, cost-sensitive decision, positive control, tabular deep learning
+\end{IEEEkeywords}
+
+%=====================================================================
+\section{Introduction}
+%=====================================================================
+UPI settles payments within seconds, so a fraudulent debit is rarely recoverable after the fact. The economically relevant intervention is therefore \emph{pre-debit}. At the moment the payer confirms a payment, the payer's bank or payment service provider (PSP) can approve the payment, or impose friction such as an additional authentication factor, a cooling-off delay or a manual review~\cite{rbi2024,npci2024}. A useful scorer must (a)~use only information that exists at that moment, (b)~output probabilities calibrated well enough to compare with a monetary cost, and (c)~be validated on a later time period than it was trained on, because fraud patterns drift~\cite{dalpozzolo2018}.
+
+Our first-review manuscript reported AUC~0.9991 and equal precision and recall of 97.69\% for a 1D-CNN. The review identified three defects. The data provenance was unresolved. The sample sizes conflicted (31,250 versus 625 test rows). The metrics were internally inconsistent: at 0.192\% prevalence, recall 97.69\% and specificity 99.39\% imply a precision of only about 23.6\%, not 97.69\%. This paper replaces those results with a single traceable experiment. In doing so, it reaches a different and better-supported conclusion.
+
+\textbf{Contributions.}
+\begin{enumerate}
+\item A \emph{feature-availability} protocol for pre-debit UPI screening. It drops authorisation outcomes, fits reference statistics on the training window only, and uses strictly backward-looking velocity counts, all enforced by unit tests (Sec.~\ref{sec:method}).
+\item A \emph{learnability audit}: multiplicity-corrected association tests, a label-permutation test~\cite{ojala2010} and a power analysis. These should precede any reported fraud model (Sec.~\ref{sec:audit}).
+\item A reconciled, \emph{out-of-time} comparison of six models. It reports bootstrap confidence intervals, exact TP/FP/FN/TN counts, calibration error, and a rupee-denominated net benefit with a break-even precision rule (Secs.~\ref{sec:models}--\ref{sec:business}).
+\item A \emph{positive control} with planted signal that validates the pipeline's power. It also includes a controlled test of whether 1D convolutions over tabular columns carry any justified advantage (Sec.~\ref{sec:pc}).
+\end{enumerate}
+
+%=====================================================================
+\section{Related Work}
+%=====================================================================
+\textbf{Fraud detection.} Bolton and Hand~\cite{bolton2002} frame fraud detection as supervised and unsupervised classification under extreme imbalance and label delay. Dal Pozzolo \emph{et al.}~\cite{dalpozzolo2018} show that realistic evaluation requires chronological splits and verification-latency-aware feedback. Whitrow \emph{et al.}~\cite{whitrow2009} and Bahnsen \emph{et al.}~\cite{bahnsen2016} show that the strongest card-fraud signals are customer-level aggregations, such as transaction velocity, deviation from the customer's own history, and periodic spending patterns. These need a persistent payer identifier.
+
+\textbf{Synthetic financial data.} Public mobile-money and payment datasets are frequently simulated, as with PaySim~\cite{lopezrojas2016}, because real labelled transactions are confidential. Results on such data reflect the simulator's assumptions, so documenting provenance is essential~\cite{gebru2021,mitchell2019}.
+
+\textbf{Evaluation under imbalance.} With prevalence near 0.2\%, ROC-AUC can look favourable while precision is very low. Precision--recall analysis is more informative~\cite{saito2015,davis2006}. Uncertainty in AUC can be quantified analytically~\cite{hanley1982,delong1988} or by bootstrap~\cite{efron1993}. Permutation tests establish whether a classifier beats chance~\cite{ojala2010}. Leakage from features unavailable at decision time is a common source of inflated results~\cite{kaufman2012}.
+
+\textbf{Calibration and cost.} Cost-sensitive decisions need calibrated probabilities~\cite{elkan2001}. Platt scaling~\cite{platt1999} and isotonic regression~\cite{niculescu2005} are standard post-hoc methods. Isotonic regression overfits when positives are few~\cite{niculescu2005}. Resampling methods such as SMOTE~\cite{chawla2002} distort probabilities and must be corrected~\cite{dalpozzolo2015}.
+
+\textbf{Deep learning on tables.} Large benchmarks find that tree ensembles such as LightGBM~\cite{ke2017} and random forests~\cite{breiman2001} still match or beat deep networks on typical tabular data~\cite{grinsztajn2022,shwartz2022}. Convolutions assume a meaningful local neighbourhood, which tabular column order does not provide.
+
+%=====================================================================
+\section{Data and Provenance}\label{sec:data}
+%=====================================================================
+\subsection{Source and integrity}
+The study uses the file \texttt{upi\_transactions\_2024.csv} (SHA-256 prefix \texttt{<<SHASHORT>>}; full hash in the repository manifest). It is a publicly redistributed transaction log with <<NROWS>> rows and 17 columns, dated <<TRSTART>> to <<TOTEND>>. It was \emph{not} released by NPCI, the RBI or any bank. It contains no payer, payee, account or device identifier, and no generating procedure is documented. Integrity checks found 0 missing values, 0 duplicate rows and 0 duplicate IDs. \texttt{hour\_of\_day}, \texttt{day\_of\_week} and \texttt{is\_weekend} are exactly consistent with \texttt{timestamp}. Amounts range from \inr10 to \inr42,099 (median \inr<<AMTMED>>). <<NFRAUD>> rows are labelled fraud (<<PREV>>\%).
+
+\textbf{Provenance statement.} Earlier drafts described this file both as ``empirical'' and as ``generated''. We now state only what can be verified: the file is public, and its origin is undocumented. Sec.~\ref{sec:audit} shows that its label behaves as if assigned independently of every recorded attribute, which is typical of a simulated dataset. We therefore treat it as a \emph{public benchmark of unknown, probably synthetic, origin}. No statement in this paper concerns real UPI fraud rates or losses.
+
+\subsection{Feature availability at the pre-debit decision}
+Table~\ref{tab:schema} classifies every column by whether it exists before authorisation. \texttt{transaction\_status} (SUCCESS/FAILED) is the outcome of authorisation. Using it would leak post-decision information~\cite{kaufman2012}, so it is excluded from all models. It is retained only in the audit.
+
+\begin{table}[t]
+\centering
+\caption{Raw columns and their pre-debit availability}\label{tab:schema}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{2.45cm}p{2.25cm}p{2.85cm}@{}}
+\toprule
+Column & Values & Pre-debit use \\
+\midrule
+transaction type & P2P, P2M, Bill, Recharge & Yes \\
+merchant\_category & 10 categories & Yes \\
+amount (INR) & 10--42,099 & Yes (log; train-fitted ratios) \\
+sender/receiver age group & 5 brackets each & Yes (KYC) \\
+sender\_state & 10 states & Yes \\
+sender/receiver bank & 8 banks each & Yes (VPA lookup) \\
+device\_type, network\_type & 3 / 4 levels & Yes \\
+hour, weekday, weekend & from timestamp & Yes \\
+timestamp & 2024 & Ordering, split, velocity \\
+transaction\_status & SUCCESS/FAILED & \textbf{No}: post-authorisation \\
+transaction id & unique & No: identifier \\
+fraud\_flag & 0/1 & Target \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Out-of-time split}
+Rows are ordered by timestamp and split by calendar date (Table~\ref{tab:split}). The test window is scored exactly once, after all modelling choices are frozen.
+
+\begin{table}[t]
+\centering
+\caption{Chronological split used in the reported run}\label{tab:split}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lcrrrr@{}}
+\toprule
+Split & Period & Rows & Frauds & Legit. & Rate (\%) \\
+\midrule
+Train & <<TRSTART>>\,--\,<<TREND>> & <<TRN>> & <<TRF>> & <<TRL>> & <<TRRATE>> \\
+Validation & <<VASTART>>\,--\,<<VAEND>> & <<VAN>> & <<VAF>> & <<VAL>> & <<VARATE>> \\
+Test & <<TESTART>>\,--\,<<TEEND>> & <<TEN>> & <<TEF>> & <<TEL>> & <<TERATE>> \\
+\midrule
+Total & & <<TOTN>> & <<TOTF>> & <<TOTL>> & <<TOTRATE>> \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%=====================================================================
+\section{Methodology}\label{sec:method}
+%=====================================================================
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[every node/.style={font=\scriptsize},
+ box/.style={draw, rounded corners, fill=blue!6, align=center, minimum height=8mm, text width=2.15cm},
+ >={Stealth[length=1.6mm]}]
+\node[box] (a) at (0,0) {Raw CSV\\SHA-256 pinned};
+\node[box] (b) at (2.75,0) {Integrity \&\\availability check};
+\node[box] (c) at (5.5,0) {Pre-debit features\\(past-only)};
+\node[box] (d) at (0,-1.25) {Learnability audit\\(tests, permutation)};
+\node[box] (e) at (2.75,-1.25) {CV model selection\\(train window)};
+\node[box] (f) at (5.5,-1.25) {Platt + threshold\\(validation window)};
+\node[box] (i) at (0,-2.5) {Positive control\\(planted signal)};
+\node[box] (g) at (2.75,-2.5) {Single test\\evaluation};
+\node[box] (h) at (5.5,-2.5) {INR cost model\\\& sensitivity};
+\draw[->] (a)--(b); \draw[->] (b)--(c); \draw[->] (c)--(f); \draw[->] (b)--(e); \draw[->] (e)--(f);
+\draw[->] (a)--(d); \draw[->] (f)--(h); \draw[->] (e)--(g); \draw[->] (g)--(h); \draw[->] (d)--(i);
+\end{tikzpicture}
+\caption{UPI Guard pipeline. Each box corresponds to a module in the released code.}\label{fig:pipe}
+\end{figure}
+
+\subsection{Pre-debit feature engineering}
+Let transaction $i$ occur at time $t_i$ with amount $a_i$ in merchant category $c_i$. We construct <<NFEAT>> inputs, grouped as follows.
+
+\emph{Transaction:} $\log(1+a_i)$; the ratio $a_i/\tilde a_{c_i}$ to the training-window median of the category; the training-window percentile of $a_i$ within $c_i$; and an indicator $a_i > q_{0.95}(c_i)$. All reference statistics come from the training window only.
+
+\emph{Temporal:} hour, $\sin(2\pi h/24)$, $\cos(2\pi h/24)$, a night flag (00:00--05:59), weekend, and weekday.
+
+\emph{Party:} sender and receiver age groups, their absolute ordinal gap, sender state, sender and receiver banks, and a same-bank flag.
+
+\emph{Device:} device and network type.
+
+\emph{Velocity:} because no payer identifier exists, we use segment-level counts. The segment is $g_i = $ (sender bank, state, age group, device). The counts are
+\begin{equation}
+v_i^{(w)} = \big|\{\, j : g_j = g_i,\; t_i - w < t_j < t_i \,\}\big|,
+\end{equation}
+for $w\in\{1\,\text{h}, 24\,\text{h}\}$, plus a global 10-minute count. The strict inequality $t_j<t_i$ guarantees that only the past is used. A unit test confirms that appending future rows never changes a past row's features. No feature uses labels.
+
+\subsection{Learnability audit}\label{sec:auditmethod}
+For each attribute, we test independence from the label: Pearson $\chi^2$ for categorical attributes (with Cram\'er's $V$), and Mann--Whitney $U$ for numeric ones (with the univariate AUC $U/(n_1n_0)$). The <<NTESTS>> $p$-values are adjusted with Benjamini--Hochberg~\cite{bh1995}. For the joint question, we compute the 3-fold cross-validated AUC of an $L_2$ logistic regression on all pre-debit attributes. We compare it with the same statistic under <<PERMN>> random permutations of the label, with $p = (1+\#\{\text{AUC}^{\pi}\ge \text{AUC}\})/(1+<<PERMN>>)$~\cite{ojala2010}.
+
+\textbf{Power.} Under $H_0$: AUC $=0.5$, the standard error of the empirical AUC is $\sqrt{(n_1+n_0+1)/(12 n_1 n_0)}$~\cite{hanley1982}. With $n_1=<<TEF>>$ test frauds, this is <<SE0>>. A one-sided 5\% test therefore requires AUC $><<AUCCRIT>>$, and 80\% power requires a true AUC of at least \textbf{<<MDA>>}. Smaller real effects cannot be confirmed on one two-month test window.
+
+\subsection{Models and selection}\label{sec:models}
+We compare a prevalence baseline (constant prior), $L_2$ logistic regression (one-hot inputs, balanced class weights), a random forest~\cite{breiman2001} (300 trees, balanced bootstrap weights), LightGBM~\cite{ke2017}, an MLP (64--32 units, early stopping), and a 1D-CNN that re-implements our earlier architecture. The CNN has two \texttt{Conv1d} layers (32 and 64 filters, kernel~2) with batch normalisation and ReLU, dropout 0.25, a dense layer of 32 units, and a sigmoid output. It uses positive-class weight $\sqrt{n_0/n_1}$ over the <<CNNINPUTS>> one-hot/scaled inputs. Small, pre-declared grids are searched by 5-fold stratified CV on the training window, using PR-AUC as the selection criterion. Selected settings: <<CVSELECT>>. We use class weights instead of SMOTE, because SMOTE distorts probability estimates~\cite{dalpozzolo2015}.
+
+\subsection{Calibration and operating points}
+Scores are recalibrated by Platt scaling~\cite{platt1999} on the validation window. We use Platt rather than isotonic regression because only <<VAF>> validation frauds are available~\cite{niculescu2005}. Expected calibration error (ECE) uses 10 equal-mass bins, because equal-width bins are almost empty at 0.2\% prevalence. Two operating points are fixed on validation and then applied unchanged to test: (a)~an \emph{alert budget} of 1\% of traffic, and (b)~the threshold that maximises validation net benefit (Sec.~\ref{sec:cost}). Option (b) may select ``flag nothing''.
+
+\subsection{INR cost model}\label{sec:cost}
+Let $r$ be the cost of one step-up or review (OTP, operations time, abandonment). Let $e\in[0,1]$ be the share of a flagged fraud that the intervention prevents. The net benefit of threshold $\theta$, relative to approving everything, is
+\begin{equation}
+B(\theta) = e \sum_{i} a_i\,\mathbb{1}[\hat p_i\ge\theta,\,y_i=1] \;-\; r \sum_i \mathbb{1}[\hat p_i\ge\theta].
+\end{equation}
+The amounts $a_i$ are the real recorded values, so the losses are in rupees. No currency conversion or invented per-incident loss is used. A flagged set is profitable only if its precision $P$ satisfies
+\begin{equation}
+P \;>\; P^{*} = \frac{r}{e\,\bar a_{\text{fraud}}}, \qquad \text{required lift} = P^{*}/\pi,
+\end{equation}
+where $\bar a_{\text{fraud}}=$\,\inr<<MEANF>> is the mean training-window fraud amount and $\pi$ is the prevalence. We take $r=$\,\inr<<COSTREV>> and $e=1$ as the base case. The value $e=1$ is deliberately optimistic in the model's favour. We vary $r$ from \inr5 to \inr100. These are \emph{stated assumptions}, not measured bank costs.
+
+\subsection{Positive control and CNN feature-order test}\label{sec:pcmethod}
+To check that the pipeline \emph{can} detect fraud when it exists, we keep all real features and replace only the label with
+\begin{equation}
+y_i^{*}\sim\text{Bernoulli}\big(\sigma(\beta_0 + s\,z_i)\big),
+\end{equation}
+where $z_i$ is the standardised risk score of Table~\ref{tab:pcterms}. It includes a night$\times$high-amount interaction that a linear model cannot represent. $\beta_0$ is solved numerically so that the mean probability equals the real prevalence of <<PREV>>\%. The strength $s$ ranges over $\{0,0.25,0.5,1,1.5,2\}$ with three label draws each. The case $s=0$ reproduces a label independent of the features. The \emph{oracle} AUC uses the true $\sigma(\beta_0+s z_i)$. These labels are simulated and are used only to validate the method. To test the convolutional premise, we retrain the CNN on five column orderings: the canonical order and four random permutations. We compare against order-invariant references (MLP, LightGBM) at $s=0$ (real labels) and at $s=<<PCREF>>$.
+
+\begin{table}[t]
+\centering
+\caption{Planted risk-score terms (positive control only)}\label{tab:pcterms}
+\footnotesize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Term (binary indicator) & Weight \\
+\midrule
+<<PCTERMS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+%=====================================================================
+\section{Results}
+%=====================================================================
+All results come from one run (seed 42, <<RUNDATE>>, <<RUNTIME>> minutes on 4 CPU cores). The full outputs are in the repository's \texttt{artifacts/} folder.
+
+\subsection{Learnability audit}\label{sec:audit}
+Table~\ref{tab:audit} lists all <<NTESTS>> association tests. The number with unadjusted $p<0.05$ is <<NRAWSIG>> (<<RAWSIGNAMES>>). Roughly 0.9 such results are expected by chance. After Benjamini--Hochberg correction, <<NBHSIG>> remain significant (smallest adjusted $p=<<MINPBH>>$). The largest Cram\'er's $V$ is <<MAXCRAMER>>. The fraud rate across the levels of every attribute stays within a narrow band around the overall <<PREV>>\%. Jointly, the cross-validated AUC with the true labels is <<PERMOBS>>. Under <<PERMN>> label permutations, the null mean is <<PERMMEAN>> (sd <<PERMSD>>, 95th percentile <<PERMQ95>>), giving $p=<<PERMP>>$ (Fig.~\ref{fig:perm}). The data therefore provide no evidence against the hypothesis that \texttt{fraud\_flag} is independent of all recorded attributes.
+
+\begin{table*}[t]
+\centering
+\caption{Learnability audit on all 250,000 rows. Statistic: $\chi^2$ (dof) or univariate AUC (Mann--Whitney). Rate range: min--max fraud rate (\%) across levels.}\label{tab:audit}
+\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Attribute & Statistic & Rate range (\%) & Cram\'er's $V$ & $p$ & $p_{\text{BH}}$ \\
+\midrule
+<<AUDITROWS>>
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.2cm, ybar, bar width=4pt, xlabel={3-fold CV ROC-AUC}, ylabel={Permutations},
+ ymin=0, ymax=<<PERMHISTMAX>>, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+ xticklabel style={/pgf/number format/fixed, /pgf/number format/precision=3}]
+\addplot[fill=blue!30, draw=blue!60] coordinates {<<PERMHIST>>};
+\draw[red, very thick] (axis cs:<<PERMOBS>>,0) -- (axis cs:<<PERMOBS>>,<<PERMHISTMAX>>);
+\node[red, anchor=south west, font=\scriptsize] at (axis cs:<<PERMOBS>>,<<PERMHISTMAX>>) {};
+\end{axis}
+\end{tikzpicture}
+\caption{Label-permutation null distribution of CV AUC (<<PERMN>> permutations). The red line is the true-label AUC (<<PERMOBS>>, $p=<<PERMP>>$).}\label{fig:perm}
+\end{figure}
+
+\subsection{Out-of-time model comparison}
+Table~\ref{tab:models} reports the single test evaluation. Training-window CV AUCs are all close to 0.5. On the Nov--Dec test window, the learned models reach ROC-AUC between <<AUCMIN>> and <<AUCMAX>>. <<CICONTAINS>> of <<NLEARNED>> bootstrap 95\% intervals (1,000 stratified resamples) contain 0.5. <<NRAWPSIG>> unadjusted one-sided Mann--Whitney test(s) fall below 0.05, and <<NHOLMSIG>> survive Holm correction for the five comparisons. The best point estimate is <<BEST>> (<<BESTAUC>>). Its bootstrap interval [<<BESTLO>>, <<BESTHI>>] has a lower bound only just above 0.5, but three observations argue against treating it as real skill. First, it is not significant once the five model comparisons are accounted for (Holm $p=<<BESTPHOLM>>$). Second, the same configuration scored <<BESTCV>> in training-window CV and <<BESTVAL>> on the validation window. Third, it lies below the minimum detectable AUC of <<MDA>>. A single nominally significant result among five, which does not replicate across time windows, is what chance alone is expected to produce. PR-AUC values are at the prevalence level (<<PRBASE>>$\times10^{-3}$). Top-decile lift ranges from <<LIFTMIN>> to <<LIFTMAX>>, compared with 1.0 for random ranking. Brier skill scores are essentially zero: no model predicts better than the constant base rate. Fig.~\ref{fig:roc} shows that all ROC curves follow the diagonal.
+
+\begin{table*}[t]
+\centering
+\caption{Out-of-time test results (Nov--Dec 2024; <<TEN>> transactions, <<TEF>> frauds). CV AUC: 5-fold on training window (mean$\pm$sd). $p$: one-sided Mann--Whitney test of AUC$>$0.5, raw / Holm-adjusted. PR-AUC, Brier skill and ECE $\times10^{3}$; PR-AUC of random ranking $=$ <<PRBASE>>.}\label{tab:models}
+\footnotesize
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+Model & CV AUC (train) & Test ROC-AUC [95\% CI] & $p$ raw / Holm & PR-AUC & Brier skill & ECE & Lift@10\% \\
+\midrule
+<<MODELROWS>>
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=6.2cm, xmin=0, xmax=1, ymin=0, ymax=1,
+ xlabel={False positive rate}, ylabel={True positive rate},
+ legend style={font=\tiny, at={(0.98,0.02)}, anchor=south east}, tick label style={font=\scriptsize}, label style={font=\scriptsize}]
+<<ROCPLOTS>>
+\addplot[black, dashed] coordinates {(0,0) (1,1)};
+\addlegendentry{Chance}
+\end{axis}
+\end{tikzpicture}
+\caption{Test-window ROC curves (Platt-calibrated scores). The AUC is shown in the legend.}\label{fig:roc}
+\end{figure}
+
+\subsection{Reconciled confusion counts}
+Table~\ref{tab:conf} gives exact counts at the 1\% alert budget fixed on validation. All rows sum to the <<TEN>> test transactions and <<TEF>> frauds. Notably, <<BEST>>, the model with the highest test AUC, places <<CB_TP>> of the <<TEF>> frauds among its <<CB_FLAGS>> alerts (TP=<<CB_TP>>, FP=<<CB_FP>>, FN=<<CB_FN>>, TN=<<CB_TN>>). Its small AUC gain therefore does not come from the high-risk tail, where an intervention would act. Across all models, at most one fraud falls in the top 1\%, against about 0.8 expected from random flagging. As an internal-consistency check, we recompute precision for every row from recall $R$, specificity $S$ and prevalence $\pi$ by Bayes' rule, $P=\frac{R\pi}{R\pi+(1-S)(1-\pi)}$. It matches the count-based value exactly. This is the identity that exposed the error in our first draft. Calibration matters for the class-weighted models. Logistic regression trained with balanced weights outputs raw scores near 0.5, giving ECE <<ECERAWLR>>$\times10^{-3}$. Platt scaling on validation reduces this to <<ECECALLR>>$\times10^{-3}$. For <<BEST>>, ECE falls from <<ECERAWBEST>> to <<ECECALBEST>> ($\times10^{-3}$). However, the calibrated probabilities are concentrated near the base rate, which is the calibrated answer when no signal exists.
+
+\begin{table}[t]
+\centering
+\caption{Test confusion counts at a 1\% alert budget (threshold fixed on validation). Prec., Rec., Spec.\ in \%.}\label{tab:conf}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+Model & TP & FP & FN & TN & Prec. & Rec. & Spec. & Lift \\
+\midrule
+<<CONFROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Business impact in INR}\label{sec:business}
+The test window contains <<TEF>> frauds totalling \inr<<TESTLOSS>> (mean \inr<<TESTMEANF>>). With $r=$\,\inr<<COSTREV>>, the break-even precision is <<BEPREC>>\%, i.e.\ <<BELIFT>>$\times$ the base rate. No model reaches this lift. At the 1\% alert budget, <<BEST>> prevents \inr<<AB_SAVED>> of fraud but incurs \inr<<AB_COST>> of review cost, a net of \inr<<AB_NET>>. When thresholds are chosen on validation to maximise net benefit, <<NCOSTNOFLAG>> of the <<NLEARNED>> models select ``flag nothing'' (Table~\ref{tab:cost}). The others flag a few hundred transactions on the strength of validation noise, catch no fraud on test, and lose money. Fig.~\ref{fig:nb} shows that every model's net-benefit curve tracks the expectation for random flagging and decreases as more traffic is flagged. Table~\ref{tab:sens} varies the review cost. Even at \inr5 per review, the required lift exceeds what any model achieves, and the best realised test benefit across all costs and models is \inr<<SENSMAX>>.
+
+\begin{table}[t]
+\centering
+\caption{Test outcome of the validation-chosen cost-optimal policy ($r=$\,\inr<<COSTREV>>, $e=1$). $\theta=\infty$: flag nothing. Amounts in INR.}\label{tab:cost}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Model & $\theta$ & Flags & Caught & Prevented & Review & Net \\
+\midrule
+<<COSTROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Sensitivity to review cost $r$ (INR). ``No-flag'': models whose validation-optimal policy flags nothing. Net: best test net benefit among models.}\label{tab:sens}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}rrrcl r@{}}
+\toprule
+$r$ & $P^{*}$ (\%) & Lift req. & No-flag & Best model & Net \\
+\midrule
+<<SENSROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=5.4cm, xlabel={Transactions flagged (\%)}, ylabel={Net benefit (INR '000)},
+ legend style={font=\tiny, at={(0.02,0.02)}, anchor=south west}, tick label style={font=\scriptsize}, label style={font=\scriptsize}]
+<<NBPLOTS>>
+\end{axis}
+\end{tikzpicture}
+\caption{Test net benefit versus share of traffic flagged ($r=$\,\inr<<COSTREV>>, $e=1$). The dashed line is the expectation for random flagging.}\label{fig:nb}
+\end{figure}
+
+\subsection{Positive control}\label{sec:pc}
+Fig.~\ref{fig:pc} and Table~\ref{tab:pc} show the planted-signal experiment. At $s=0$, all models score <<PC0MIN>>--<<PC0MAX>>, reproducing the real-data result. As $s$ grows, the models track the oracle closely. At $s=0.5$, LightGBM reaches <<PC05LGB>> against an oracle of <<PC05ORC>>. At $s=<<PCREF>>$, the AUCs are <<PCREFLGB>> (LightGBM), <<PCREFRF>> (random forest) and <<PCREFLR>> (logistic regression), against an oracle of <<PCREFORC>>. The same INR cost model then yields a positive net benefit of \inr<<PCREFNB>>. Even the weak signal at $s=0.5$ (oracle AUC <<PC05ORC>>) is already profitable (\inr<<PC05NB>> for LightGBM). The break-even rule is therefore attainable whenever a real signal exists. Permutation importance on the planted setting ranks <<IMPTOP>> highest. Each of these is an input to a planted term, so the explanation recovers the true drivers. Feature-group ablation (Table~\ref{tab:abl}) shows modest, consistent losses on planted labels (removing any group costs 0.006--0.017 AUC). The losses are small because the groups are partly redundant; for example, segment velocity encodes time of day. On the real labels, the ablation differences are within about one null standard error (<<SE0>>) of each other, as expected for noise. The pipeline therefore has the power to find fraud signal of realistic size, and the absence of signal in the preceding subsections is a property of the dataset.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=5.2cm, xlabel={Planted signal strength $s$}, ylabel={Test ROC-AUC}, ymin=0.4, ymax=1.0,
+ legend style={font=\tiny, at={(0.98,0.02)}, anchor=south east}, tick label style={font=\scriptsize}, label style={font=\scriptsize}]
+<<PCPLOTS>>
+\end{axis}
+\end{tikzpicture}
+\caption{Positive control on \emph{simulated} labels (mean of three draws). The models approach the oracle once a signal exists. At $s=0$, they reproduce the real-data result.}\label{fig:pc}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Positive control: test ROC-AUC (mean$\pm$sd, 3 label draws) and LightGBM net benefit (INR, $r=25$). Simulated labels.}\label{tab:pc}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{}cccccr@{}}
+\toprule
+$s$ & Oracle & Logistic & Rand.\ forest & LightGBM & Net (INR) \\
+\midrule
+<<PCROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Feature-group ablation (LightGBM test ROC-AUC)}\label{tab:abl}
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Group removed & Real labels & Planted, $s$=<<PCREF>> \\
+\midrule
+<<ABLROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Does the 1D-CNN's column order matter?}
+Table~\ref{tab:cnn} shows the results. On real labels, the CNN is at chance under every ordering (<<CNNREALMIN>>--<<CNNREALMAX>>). On planted labels, the five orderings give almost identical ROC-AUC (<<CNNPCMIN>>--<<CNNPCMAX>>, sd <<CNNPCSD>>), so column order is \emph{not} what the network exploits. After flattening, the dense layer sees every column, and the model behaves like an MLP with a small convolutional pre-processing step. It does not outperform the order-invariant references (MLP <<MLPPC>>, LightGBM <<LIGHTGBMPC>>). It is clearly worse on PR-AUC, the metric that matters at 0.2\% prevalence (about 0.59--0.62 versus 0.68 and 0.70; Table~\ref{tab:cnn}). In the reported run it also took about 139\,s to train, against about 3\,s for LightGBM (run log). The premise of our earlier drafts, that local convolutions discover ``hierarchical feature correlations'' in tabular data, is therefore unsupported. This agrees with large tabular benchmarks~\cite{grinsztajn2022,shwartz2022}. We retain the CNN only as a comparison model.
+
+\begin{table}[t]
+\centering
+\caption{1D-CNN feature-order sensitivity (test ROC-AUC; PR-AUC $\times10^3$)}\label{tab:cnn}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}llcc@{}}
+\toprule
+Labels & Ordering / model & ROC-AUC & PR-AUC \\
+\midrule
+<<CNNROWS>>
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Latency}
+Scoring one transaction end to end (feature construction, model and calibration) on one CPU took a median of <<LATLR>>~ms for logistic regression and <<LATLGB>>~ms for LightGBM (95th percentile <<LATLGB95>>~ms). The random forest took <<LATRF>>~ms, dominated by parallel-dispatch overhead. Most of the single-row time is spent constructing the pandas feature frame; a vectorised or compiled feature path would reduce it. These times exclude the network and feature-store lookups that a production authorisation path would add.
+
+%=====================================================================
+\section{Discussion}
+%=====================================================================
+\subsection{Reconciliation with earlier versions}
+Table~\ref{tab:recon} maps each earlier claim to its status. The earlier figures cannot be regenerated from this file under any leakage-free protocol we tested. The audit indicates why: the label carries no detectable information about the attributes. Any near-perfect score on this file must therefore come from leakage, a different dataset or a reporting error. We withdraw those claims.
+
+\begin{table}[t]
+\centering
+\caption{Earlier claims versus this run}\label{tab:recon}
+\footnotesize
+\begin{tabular}{@{}p{3.1cm}p{4.6cm}@{}}
+\toprule
+V1/V2 claim & Status in this run \\
+\midrule
+AUC 0.9991 (1D-CNN) & Not reproducible. Test AUC <<CNNREALCANON>>; best model <<BESTAUC>>. \\
+Precision = recall = 97.69\% & Internally inconsistent (implied precision $\approx$23.6\%). At a 1\% alert budget, the best model catches <<MAXTP>> of <<TEF>> frauds (precision $\le$<<MAXPREC>>\%). \\
+Test set 31,250 \emph{and} 625 rows & One test window: <<TEN>> rows, <<TEF>> frauds (Nov--Dec). \\
+``Empirical'' and ``generated'' data & Public, undocumented origin; label independent of attributes. \\
+\$6.35M savings at \$50K/fraud & Replaced by INR model on real amounts; optimal policy saves \inr0. \\
+Telemetry adds +0.15\% AUC & On real labels, group ablation differences lie within noise (null SE <<SE0>>; Table~\ref{tab:abl}). \\
+Latency $<$12\,ms & Measured end to end in Python: <<LATLGB>>\,ms (LightGBM, median). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{What a deployable UPI scorer would need}
+The positive control shows what is missing in the data, not in the method. Card-fraud practice~\cite{whitrow2009,bahnsen2016} indicates that the predictive signals are entity-level. Examples are a payer's velocity and amount deviation relative to their own history, payee novelty (first payment to this VPA), device and SIM changes, collect-request patterns and beneficiary mule scores. Every one of these needs a persistent pseudonymous payer, payee and device identifier, which the public file lacks. A real study would also need the label confirmation delay, to avoid using unconfirmed recent labels~\cite{dalpozzolo2018}. It would need several months of out-of-time tests; Sec.~\ref{sec:auditmethod} shows that <<TEF>> frauds cannot confirm an AUC below <<MDA>>. Finally, it would need measured intervention costs and abandonment rates in place of our assumed \inr<<COSTREV>>.
+
+\subsection{Threats to validity}
+\emph{Construct:} the meaning of \texttt{fraud\_flag} is undocumented. \emph{Internal:} hyper-parameter grids were small. With no signal, larger grids would only increase the risk of selection noise, and the positive control shows that the chosen settings are adequate when signal exists. \emph{External:} the conclusions apply to this file; they do not show that UPI fraud is unpredictable. \emph{Ethical:} age-based features could produce disparate step-up rates and must be monitored by group if used on real data~\cite{mitchell2019}.
+
+%=====================================================================
+\section{Reproducibility}
+%=====================================================================
+Code, the dataset hash, all artifacts and a Streamlit application are in the project repository: \url{https://github.com/yogendra9476/UPI-Guard-Fraud-Detection}. The following commands reproduce every table and figure.
+\begin{enumerate}
+\item \texttt{pip install -r requirements.txt} (plus \texttt{torch} for the CNN). The reported run used Python <<VER_PYTHON>>, scikit-learn <<VER_SCIKITLEARN>>, LightGBM <<VER_LIGHTGBM>>, pandas <<VER_PANDAS>>, NumPy <<VER_NUMPY>> and PyTorch <<VER_TORCH>>.
+\item \texttt{python run\_pipeline.py}: one seeded run (seed 42), which writes \texttt{artifacts/manifest.json} with the SHA-256 of the data (\texttt{<<SHASHORT>>\ldots}), the split counts and all metrics.
+\item \texttt{python build\_report.py}: inserts every number in this paper from the artifacts into the \LaTeX{} source, so the text cannot drift from the run.
+\item \texttt{pytest -q}: twelve tests covering schema, chronological disjointness, absence of post-authorisation inputs, past-only velocity, train-only statistics, the precision identity and the cost model.
+\item \texttt{streamlit run app.py}: an eight-page application for data exploration, the audit, results, the positive control, interactive INR cost analysis, live single and batch pre-debit scoring, and the reproducibility record.
+\end{enumerate}
+A data card and a model card document scope, intended use and limitations~\cite{gebru2021,mitchell2019}.
+
+%=====================================================================
+\section{Conclusion}
+%=====================================================================
+We rebuilt our UPI fraud study as a single traceable experiment designed around the pre-debit decision. On the supplied public dataset, a learnability audit, five learned models and an INR cost model agree. The fraud label is not reliably predictable from any pre-debit attribute. The best out-of-time AUC is <<BESTAUC>> [<<BESTLO>>, <<BESTHI>>], which is not significant after multiplicity correction and is not replicated across time windows, and the cost-optimal policy is not to intervene. A positive control shows that the same pipeline recovers near-oracle performance and positive rupee benefit when a signal exists. The 1D-CNN's convolutions provide no advantage over order-invariant models. The contribution is therefore methodological. Pre-debit feature discipline, learnability testing, power analysis, reconciled counts and break-even precision should accompany any reported fraud model, especially one trained on public data of uncertain provenance. Future work will apply the released pipeline to a labelled dataset with persistent entity identifiers and confirmed label dates.
+
+\section*{Acknowledgment}
+We thank the course instructors and the first-review panel, whose detailed feedback motivated this reconstruction. We used scikit-learn~\cite{pedregosa2011}, LightGBM, PyTorch, pandas, Streamlit and pgfplots. Generative AI tools were used to assist with code refactoring and language editing. All experimental results were produced by the released code and checked by the authors.
+
+\begin{thebibliography}{99}\footnotesize
+\bibitem{rbi2024} Reserve Bank of India, ``Annual Report 2023--24,'' Mumbai, May 2024.
+\bibitem{npci2024} National Payments Corporation of India, ``UPI product statistics,'' 2024. [Online]. Available: \url{https://www.npci.org.in/what-we-do/upi/product-statistics}
+\bibitem{bolton2002} R.~J. Bolton and D.~J. Hand, ``Statistical fraud detection: A review,'' \emph{Statistical Science}, vol.~17, no.~3, pp.~235--255, 2002.
+\bibitem{dalpozzolo2018} A.~Dal~Pozzolo, G.~Boracchi, O.~Caelen, C.~Alippi, and G.~Bontempi, ``Credit card fraud detection: A realistic modeling and a novel learning strategy,'' \emph{IEEE Trans. Neural Netw. Learn. Syst.}, vol.~29, no.~8, pp.~3784--3797, 2018.
+\bibitem{dalpozzolo2015} A.~Dal~Pozzolo, O.~Caelen, R.~A. Johnson, and G.~Bontempi, ``Calibrating probability with undersampling for unbalanced classification,'' in \emph{Proc. IEEE Symp. Comput. Intell. Data Mining (CIDM)}, 2015, pp.~159--166.
+\bibitem{whitrow2009} C.~Whitrow, D.~J. Hand, P.~Juszczak, D.~Weston, and N.~M. Adams, ``Transaction aggregation as a strategy for credit card fraud detection,'' \emph{Data Mining Knowl. Discov.}, vol.~18, no.~1, pp.~30--55, 2009.
+\bibitem{bahnsen2016} A.~Correa~Bahnsen, D.~Aouada, A.~Stojanovic, and B.~Ottersten, ``Feature engineering strategies for credit card fraud detection,'' \emph{Expert Syst. Appl.}, vol.~51, pp.~134--142, 2016.
+\bibitem{lopezrojas2016} E.~A. Lopez-Rojas, A.~Elmir, and S.~Axelsson, ``PaySim: A financial mobile money simulator for fraud detection,'' in \emph{Proc. 28th European Modeling and Simulation Symp.}, 2016, pp.~249--255.
+\bibitem{gebru2021} T.~Gebru \emph{et al.}, ``Datasheets for datasets,'' \emph{Commun. ACM}, vol.~64, no.~12, pp.~86--92, 2021.
+\bibitem{mitchell2019} M.~Mitchell \emph{et al.}, ``Model cards for model reporting,'' in \emph{Proc. ACM FAT*}, 2019, pp.~220--229.
+\bibitem{saito2015} T.~Saito and M.~Rehmsmeier, ``The precision-recall plot is more informative than the ROC plot when evaluating binary classifiers on imbalanced datasets,'' \emph{PLOS ONE}, vol.~10, no.~3, e0118432, 2015.
+\bibitem{davis2006} J.~Davis and M.~Goadrich, ``The relationship between precision-recall and ROC curves,'' in \emph{Proc. 23rd ICML}, 2006, pp.~233--240.
+\bibitem{hanley1982} J.~A. Hanley and B.~J. McNeil, ``The meaning and use of the area under a receiver operating characteristic (ROC) curve,'' \emph{Radiology}, vol.~143, no.~1, pp.~29--36, 1982.
+\bibitem{delong1988} E.~R. DeLong, D.~M. DeLong, and D.~L. Clarke-Pearson, ``Comparing the areas under two or more correlated receiver operating characteristic curves: A nonparametric approach,'' \emph{Biometrics}, vol.~44, no.~3, pp.~837--845, 1988.
+\bibitem{efron1993} B.~Efron and R.~J. Tibshirani, \emph{An Introduction to the Bootstrap}. New York: Chapman \& Hall, 1993.
+\bibitem{ojala2010} M.~Ojala and G.~C. Garriga, ``Permutation tests for studying classifier performance,'' \emph{J. Mach. Learn. Res.}, vol.~11, pp.~1833--1863, 2010.
+\bibitem{bh1995} Y.~Benjamini and Y.~Hochberg, ``Controlling the false discovery rate: A practical and powerful approach to multiple testing,'' \emph{J. R. Stat. Soc. B}, vol.~57, no.~1, pp.~289--300, 1995.
+\bibitem{kaufman2012} S.~Kaufman, S.~Rosset, C.~Perlich, and O.~Stitelman, ``Leakage in data mining: Formulation, detection, and avoidance,'' \emph{ACM Trans. Knowl. Discov. Data}, vol.~6, no.~4, pp.~1--21, 2012.
+\bibitem{elkan2001} C.~Elkan, ``The foundations of cost-sensitive learning,'' in \emph{Proc. 17th IJCAI}, 2001, pp.~973--978.
+\bibitem{platt1999} J.~Platt, ``Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods,'' in \emph{Advances in Large Margin Classifiers}, MIT Press, 1999, pp.~61--74.
+\bibitem{niculescu2005} A.~Niculescu-Mizil and R.~Caruana, ``Predicting good probabilities with supervised learning,'' in \emph{Proc. 22nd ICML}, 2005, pp.~625--632.
+\bibitem{chawla2002} N.~V. Chawla, K.~W. Bowyer, L.~O. Hall, and W.~P. Kegelmeyer, ``SMOTE: Synthetic minority over-sampling technique,'' \emph{J. Artif. Intell. Res.}, vol.~16, pp.~321--357, 2002.
+\bibitem{ke2017} G.~Ke \emph{et al.}, ``LightGBM: A highly efficient gradient boosting decision tree,'' in \emph{Advances in NeurIPS}, vol.~30, 2017.
+\bibitem{breiman2001} L.~Breiman, ``Random forests,'' \emph{Machine Learning}, vol.~45, no.~1, pp.~5--32, 2001.
+\bibitem{grinsztajn2022} L.~Grinsztajn, E.~Oyallon, and G.~Varoquaux, ``Why do tree-based models still outperform deep learning on typical tabular data?'' in \emph{Advances in NeurIPS (Datasets and Benchmarks)}, vol.~35, 2022.
+\bibitem{shwartz2022} R.~Shwartz-Ziv and A.~Armon, ``Tabular data: Deep learning is not all you need,'' \emph{Information Fusion}, vol.~81, pp.~84--90, 2022.
+\bibitem{pedregosa2011} F.~Pedregosa \emph{et al.}, ``Scikit-learn: Machine learning in Python,'' \emph{J. Mach. Learn. Res.}, vol.~12, pp.~2825--2830, 2011.
+\end{thebibliography}
+
+\end{document}
